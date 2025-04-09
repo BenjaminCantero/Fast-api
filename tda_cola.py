@@ -7,13 +7,11 @@ class Cola:
 
     def dequeue(self):
         if self.is_empty():
-            raise IndexError("Cola vacía")
+            return None
         return self.items.pop(0)
 
     def first(self):
-        if self.is_empty():
-            raise IndexError("Cola vacía")
-        return self.items[0]
+        return self.items[0] if not self.is_empty() else None
 
     def is_empty(self):
         return len(self.items) == 0

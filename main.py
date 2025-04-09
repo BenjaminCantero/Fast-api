@@ -1,69 +1,79 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi import FastAPI, Depends, HTTPException
+from sqlalchemy.orm import Session
+from database import SessionLocal, engine
+import models, schemas
 from tda_cola import Cola
+
+# Crear tablas
+models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
-# Base de datos simulada
-personajes_db = {}
-misiones_db = {}
-misiones_por_personaje = {}
+# Base de datos (por dependencia)
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-# Modelos
-class Personaje(BaseModel):
-    nombre: str
-    nivel: int = 1
-    experiencia: int = 0
+# Diccionario para colas por personaje
+colas_por_personaje = {}
 
-class Mision(BaseModel):
-    nombre: str
-    descripcion: str
-    experiencia: int
+# --- Endpoints ---
 
-# --- Endpoints CRUD básicos ---
-@app.post("/personajes")
-def crear_personaje(p: Personaje):
-    nuevo_id = max(personajes_db.keys(), default=0) + 1
-    personajes_db[nuevo_id] = p.dict()
-    misiones_por_personaje[nuevo_id] = Cola()
-    return {"id": nuevo_id, "personaje": personajes_db[nuevo_id]}
+@app.post("/personajes", response_model=schemas.Personaje)
+def crear_personaje(personaje: schemas.PersonajeCreate, db: Session = Depends(get_db)):
+    db_personaje = models.Personaje(**personaje.dict())
+    db.add(db_personaje)
+    db.commit()
+    db.refresh(db_personaje)
+    colas_por_personaje[db_personaje.id] = Cola()
+    return db_personaje
 
-@app.post("/misiones")
-def crear_mision(m: Mision):
-    nuevo_id = max(misiones_db.keys(), default=0) + 1
-    misiones_db[nuevo_id] = m.dict()
-    return {"id": nuevo_id, "mision": misiones_db[nuevo_id]}
+@app.post("/misiones", response_model=schemas.Mision)
+def crear_mision(mision: schemas.MisionCreate, db: Session = Depends(get_db)):
+    db_mision = models.Mision(**mision.dict())
+    db.add(db_mision)
+    db.commit()
+    db.refresh(db_mision)
+    return db_mision
 
-# --- Aceptar misión (encolar) ---
-@app.post("/personajes/{id_personaje}/misiones/{id_mision}")
-def aceptar_mision(id_personaje: int, id_mision: int):
-    if id_personaje not in personajes_db or id_mision not in misiones_db:
-        raise HTTPException(status_code=404, detail="Personaje o misión no encontrada")
-    mision = {"id": id_mision, **misiones_db[id_mision]}
-    misiones_por_personaje[id_personaje].enqueue(mision)
-    return {"mensaje": "Misión aceptada", "mision": mision}
+@app.post("/personajes/{personaje_id}/misiones/{mision_id}")
+def aceptar_mision(personaje_id: int, mision_id: int, db: Session = Depends(get_db)):
+    personaje = db.query(models.Personaje).get(personaje_id)
+    mision = db.query(models.Mision).get(mision_id)
 
-# --- Completar misión (desencolar) ---
-@app.post("/personajes/{id_personaje}/completar")
-def completar_mision(id_personaje: int):
-    if id_personaje not in personajes_db:
-        raise HTTPException(status_code=404, detail="Personaje no encontrado")
-    cola = misiones_por_personaje[id_personaje]
-    if cola.is_empty():
-        raise HTTPException(status_code=400, detail="No hay misiones por completar")
-    
-    mision_completada = cola.dequeue()
-    personajes_db[id_personaje]["experiencia"] += mision_completada["experiencia"]
-    return {
-        "mensaje": "Misión completada",
-        "mision": mision_completada,
-        "experiencia_total": personajes_db[id_personaje]["experiencia"]
-    }
+    if not personaje or not mision:
+        raise HTTPException(status_code=404, detail="Personaje o misión no encontrados")
 
-# --- Listar misiones de un personaje ---
-@app.get("/personajes/{id_personaje}/misiones")
-def listar_misiones(id_personaje: int):
-    if id_personaje not in personajes_db:
-        raise HTTPException(status_code=404, detail="Personaje no encontrado")
-    cola = misiones_por_personaje[id_personaje]
-    return {"misiones": cola.items}
+    personaje.misiones.append(mision)
+    db.commit()
+
+    if personaje_id not in colas_por_personaje:
+        colas_por_personaje[personaje_id] = Cola()
+    colas_por_personaje[personaje_id].enqueue(mision.id)
+
+    return {"mensaje": "Misión aceptada"}
+
+@app.post("/personajes/{personaje_id}/completar")
+def completar_mision(personaje_id: int, db: Session = Depends(get_db)):
+    cola = colas_por_personaje.get(personaje_id)
+    if not cola or cola.is_empty():
+        raise HTTPException(status_code=400, detail="No hay misiones en cola")
+
+    mision_id = cola.dequeue()
+    mision = db.query(models.Mision).get(mision_id)
+    personaje = db.query(models.Personaje).get(personaje_id)
+
+    personaje.experiencia += mision.experiencia
+    db.commit()
+
+    return {"mensaje": f"Misión '{mision.nombre}' completada", "xp_ganada": mision.experiencia}
+
+@app.get("/personajes/{personaje_id}/misiones")
+def listar_misiones_en_cola(personaje_id: int):
+    cola = colas_por_personaje.get(personaje_id)
+    if not cola:
+        raise HTTPException(status_code=404, detail="No se encontró cola para el personaje")
+    return {"misiones_en_orden": cola.items}
