@@ -4,12 +4,12 @@ from database import SessionLocal, engine
 import models, schemas
 from tda_cola import Cola
 
-# Crear tablas
+
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
-# Base de datos (por dependencia)
+
 def get_db():
     db = SessionLocal()
     try:
@@ -17,7 +17,7 @@ def get_db():
     finally:
         db.close()
 
-# Diccionario para colas por personaje
+
 colas_por_personaje = {}
 
 # --- Endpoints ---
